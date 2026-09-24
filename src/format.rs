@@ -119,6 +119,22 @@ pub(crate) fn children(page: &[u8], pgno: u32) -> Result<Vec<u32>> {
     Ok(out)
 }
 
+/// Visit every page of the b-tree rooted at `root`, parents before children.
+pub(crate) fn scan(pages: &Pages, root: u32, f: &mut dyn FnMut(u32, &[u8]) -> Result<()>) -> Result<()> {
+    let mut stack = vec![(root, 0)];
+    while let Some((pgno, depth)) = stack.pop() {
+        if depth > 64 {
+            return Err(corrupt("b-tree too deep (cycle?)"));
+        }
+        let page = pages.page(pgno)?;
+        f(pgno, &page)?;
+        if matches!(page_type(&page, pgno), INTERIOR_TABLE | INTERIOR_INDEX) {
+            stack.extend(children(&page, pgno)?.into_iter().map(|c| (c, depth + 1)));
+        }
+    }
+    Ok(())
+}
+
 /// A table-leaf cell with its payload still split between the page and an overflow chain.
 pub(crate) struct Cell<'a> {
     pub rowid: i64,

@@ -20,6 +20,7 @@
 
 
 mod format;
+mod schema;
 
 use std::fmt;
 
