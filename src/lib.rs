@@ -19,6 +19,8 @@
 //! ```
 
 
+mod format;
+
 use std::fmt;
 
 /// A single SQLite value as stored in a record.
