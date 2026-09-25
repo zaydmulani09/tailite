@@ -13,6 +13,9 @@ pub(crate) struct Table {
     pub defaults: Vec<Value>,
     /// Column that is an alias for the rowid (stored as NULL in the record).
     pub rowid_alias: Option<usize>,
+    /// REAL-affinity columns: SQLite stores integral values there as integers on disk
+    /// and converts them back when read.
+    pub real: Vec<bool>,
     pub without_rowid: bool,
 }
 
@@ -24,6 +27,11 @@ impl Table {
         values.extend(self.defaults[have..].iter().cloned());
         if let Some(i) = self.rowid_alias {
             values[i] = Value::Integer(rowid);
+        }
+        for (v, &real) in values.iter_mut().zip(&self.real) {
+            if let (Value::Integer(n), true) = (&*v, real) {
+                *v = Value::Real(*n as f64);
+            }
         }
         values
     }
@@ -185,7 +193,7 @@ fn literal(toks: &[Tok]) -> Value {
 /// Parse the parts of a CREATE TABLE statement that affect how records decode.
 pub(crate) fn parse_create_table(sql: &str) -> Table {
     let toks = tokenize(sql);
-    let mut t = Table { name: String::new(), root: 0, columns: vec![], defaults: vec![], rowid_alias: None, without_rowid: false };
+    let mut t = Table { name: String::new(), root: 0, columns: vec![], defaults: vec![], rowid_alias: None, real: vec![], without_rowid: false };
     let Some(open) = toks.iter().position(|x| *x == Tok::Punct('(')) else { return t };
     // split the parenthesised body into top-level comma-separated definitions
     let (mut defs, mut cur, mut depth, mut end) = (vec![], vec![], 0, toks.len());
@@ -251,7 +259,11 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
                 _ => literal(v),
             })
             .unwrap_or(Value::Null);
-        types.push(ty.join(" "));
+        // affinity rules, in SQLite's order: INT wins, then text and blob, then REAL
+        let ty_s = ty.join(" ");
+        let has = |k: &str| ty_s.contains(k);
+        t.real.push(!has("INT") && !has("CHAR") && !has("CLOB") && !has("TEXT") && !has("BLOB") && (has("REAL") || has("FLOA") || has("DOUB")));
+        types.push(ty_s);
         t.columns.push(name.clone());
         t.defaults.push(default);
     }
@@ -290,6 +302,7 @@ mod tests {
         assert_eq!(t.defaults[3], Value::Blob(vec![0, 255]));
         assert_eq!(t.defaults[4], Value::Integer(1));
         assert!(!t.without_rowid);
+        assert_eq!(parse_create_table("CREATE TABLE t(a REAL, b FLOATING POINT, c DOUBLE PRECISION, d POINT INT, e)").real, [true, false, true, false, false]);
     }
 
     #[test]
