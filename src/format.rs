@@ -8,7 +8,6 @@ use std::io;
 
 pub(crate) const INTERIOR_INDEX: u8 = 0x02;
 pub(crate) const INTERIOR_TABLE: u8 = 0x05;
-pub(crate) const LEAF_INDEX: u8 = 0x0a;
 pub(crate) const LEAF_TABLE: u8 = 0x0d;
 
 /// Positioned read that works on unix and windows without moving a shared cursor.
