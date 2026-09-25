@@ -21,6 +21,7 @@
 
 mod format;
 mod schema;
+mod wal;
 
 use std::fmt;
 
