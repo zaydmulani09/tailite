@@ -21,9 +21,31 @@
 
 mod format;
 mod schema;
+mod tail;
+mod tracker;
 mod wal;
 
 use std::fmt;
+use std::path::Path;
+
+pub use tail::{Tail, Transaction};
+
+/// Row-level difference between two database files (either journal mode; a WAL
+/// database's committed log is included). Unlike a full-table comparison, only pages
+/// whose bytes differ are decoded, so the cost follows the size of the change.
+/// Neither file should be written while the diff runs.
+pub fn diff(old: impl AsRef<Path>, new: impl AsRef<Path>) -> Result<Vec<Change>> {
+    let (a, b) = (tail::Files::open(old.as_ref())?, tail::Files::open(new.as_ref())?);
+    let (pa, pb) = (a.pages(None), b.pages(None));
+    let n = a.page_count()?.max(b.page_count()?);
+    let mut changed = std::collections::HashSet::new();
+    for p in 1..=n {
+        if a.geo.page_size != b.geo.page_size || pa.page(p)? != pb.page(p)? {
+            changed.insert(p);
+        }
+    }
+    tracker::Tracker::build(&pa)?.rebuild(&pa, &pb, &changed)
+}
 
 /// A single SQLite value as stored in a record.
 #[derive(Clone, Debug, PartialEq)]
