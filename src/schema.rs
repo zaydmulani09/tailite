@@ -244,7 +244,24 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
             })
             .collect();
         let rest = &def[cons..];
-        let pk = rest.iter().position(|x| kw(Some(x), "PRIMARY"));
+        // `[GENERATED ALWAYS] AS (expr) [VIRTUAL|STORED]`: VIRTUAL columns are computed on
+        // read and never stored, so they are not part of the record (or of our rows)
+        let mut depth = 0;
+        let top: Vec<&Tok> = rest
+            .iter()
+            .filter(|x| {
+                match x {
+                    Tok::Punct('(') => depth += 1,
+                    Tok::Punct(')') => depth -= 1,
+                    _ => return depth == 0,
+                }
+                false
+            })
+            .collect();
+        if top.iter().any(|x| kw(Some(x), "AS")) && !top.iter().any(|x| kw(Some(x), "STORED")) {
+            continue;
+        }
+        let pk =rest.iter().position(|x| kw(Some(x), "PRIMARY"));
         let desc = pk.is_some_and(|p| kw(rest.get(p + 2), "DESC"));
         if pk.is_some() && !desc && ty.join(" ") == "INTEGER" {
             t.rowid_alias = Some(t.columns.len());
