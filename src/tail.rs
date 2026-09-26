@@ -163,6 +163,13 @@ impl Tail {
         Ok(Tail { files, tracker, pin: Some(pin), spare: None, path, seq: 0 })
     }
 
+    /// Every row as of the last processed transaction, as inserts. Called right after
+    /// [`Tail::open`], this is the initial load that the following polls continue
+    /// without gap or overlap: the state it reads is pinned, so nothing slips between.
+    pub fn snapshot(&self) -> Result<Vec<Change>> {
+        self.tracker.snapshot(&self.files.pages(None))
+    }
+
     /// Tables tailite sees but cannot decode yet (WITHOUT ROWID).
     pub fn skipped_tables(&self) -> &[String] {
         &self.tracker.schema.skipped

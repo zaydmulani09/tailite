@@ -7,7 +7,7 @@ const USAGE: &str = "\
 tailite: row-level change data capture for SQLite, read from the WAL
 
 USAGE:
-    tailite watch <db> [--json] [--table <name>]... [--interval <ms>]
+    tailite watch <db> [--json] [--snapshot] [--table <name>]... [--interval <ms>]
     tailite diff <old.db> <new.db> [--json] [--table <name>]...
 
 watch  Follow a live database (WAL mode) and print every committed row change
@@ -16,6 +16,8 @@ diff   Print the row changes that turn one database file into another.
 
 OPTIONS:
     --json             One JSON object per changed row (JSON Lines)
+    --snapshot         watch: first print every existing row as an insert (tx 0),
+                       then follow; a consistent initial load for replication
     --table <name>     Only report this table (repeatable)
     --interval <ms>    Poll interval for watch [default: 100]
 ";
@@ -23,17 +25,19 @@ OPTIONS:
 struct Opts {
     files: Vec<String>,
     json: bool,
+    snapshot: bool,
     tables: Vec<String>,
     interval: u64,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { files: vec![], json: false, tables: vec![], interval: 100 };
+    let mut o = Opts { files: vec![], json: false, snapshot: false, tables: vec![], interval: 100 };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().cloned().ok_or(format!("{name} needs a value"));
         match a.as_str() {
             "--json" => o.json = true,
+            "--snapshot" => o.snapshot = true,
             "--table" => o.tables.push(val("--table")?),
             "--interval" => o.interval = val("--interval")?.parse().map_err(|_| "--interval takes milliseconds")?,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
@@ -75,6 +79,13 @@ fn watch(o: Opts) -> Result<(), String> {
     }
     eprintln!("tailite: following {db}");
     let mut out = io::stdout().lock();
+    if o.snapshot {
+        for c in tail.snapshot().map_err(|e| e.to_string())? {
+            if (o.tables.is_empty() || o.tables.contains(&c.table)) && print(&mut out, &o, Some(0), &c).is_err() {
+                return Ok(());
+            }
+        }
+    }
     loop {
         for tx in tail.poll().map_err(|e| e.to_string())? {
             for c in tx.changes.iter().filter(|c| o.tables.is_empty() || o.tables.contains(&c.table)) {

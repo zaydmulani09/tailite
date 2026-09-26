@@ -187,6 +187,17 @@ impl Tracker {
         Ok(diff(&self.schema, &self.schema, old_rows, new_rows))
     }
 
+    /// Every row of every tracked table in this state, as inserts.
+    pub fn snapshot(&self, pages: &Pages) -> Result<Vec<Change>> {
+        let owner = |p: u32| self.owner.get(&p).copied();
+        let side = Side { pages, schema: &self.schema, owner: &owner };
+        let mut rows = Rows::new();
+        for &p in self.owner.keys() {
+            leaf_rows(&side, p, None, &mut rows)?;
+        }
+        Ok(diff(&self.schema, &self.schema, Rows::new(), rows))
+    }
+
     /// Debug aid (`TAILITE_VERIFY=1`): compare the incrementally maintained indexes with
     /// a full rebuild after every transaction. Slow; for tests and bug reports.
     fn verify(&self, pages: &Pages) {
