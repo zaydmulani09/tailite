@@ -263,3 +263,111 @@ fn random_workload_auto_vacuum() {
         random_workload(&format!("av-{seed}"), "PRAGMA page_size=1024; PRAGMA auto_vacuum=FULL;", seed * 0xd1b54a32d192ed03, 250);
     }
 }
+
+#[test]
+fn snapshot_then_stream_is_complete() {
+    let path = temp_db("snapshot");
+    let w = writer(&path, "");
+    w.execute_batch(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v);
+         WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<2000) INSERT INTO t(v) SELECT randomblob(i % 700) FROM s;",
+    )
+    .unwrap();
+    let mut tail = Tail::open(&path).unwrap();
+    let mut mirror = Mirror::new();
+    replay(&mut mirror, &tail.snapshot().unwrap());
+    check(&w, &mut mirror);
+    w.execute_batch("DELETE FROM t WHERE id % 3 = 0; UPDATE t SET v = 'x' WHERE id % 5 = 0;").unwrap();
+    poll_into(&mut tail, &mut mirror);
+    check(&w, &mut mirror);
+}
+
+#[test]
+fn schema_changes_are_followed() {
+    let path = temp_db("ddl");
+    let w = writer(&path, "");
+    w.execute_batch("CREATE TABLE a(x); INSERT INTO a VALUES (1), (2);").unwrap();
+    let mut tail = Tail::open(&path).unwrap();
+    let mut mirror = truth(&w);
+
+    // ADD COLUMN: old records are shorter; the default fills the gap in before-images
+    w.execute_batch("ALTER TABLE a ADD COLUMN y TEXT DEFAULT 'none'; UPDATE a SET x = 10 WHERE x = 1;").unwrap();
+    let txs = tail.poll().unwrap();
+    let upd = txs.iter().flat_map(|t| &t.changes).find(|c| c.op == Op::Update).unwrap();
+    assert_eq!(upd.before.as_ref().unwrap(), &[Value::Integer(1), Value::Text("none".into())]);
+    assert_eq!(upd.after.as_ref().unwrap(), &[Value::Integer(10), Value::Text("none".into())]);
+
+    // create + fill in one transaction, then rename, then drop
+    w.execute_batch("BEGIN; CREATE TABLE b(k INTEGER PRIMARY KEY, v); INSERT INTO b(v) VALUES ('p'), ('q'); COMMIT;").unwrap();
+    let txs = tail.poll().unwrap();
+    let ins: Vec<_> = txs.iter().flat_map(|t| &t.changes).filter(|c| c.table == "b").collect();
+    assert_eq!(ins.len(), 2);
+    w.execute_batch("ALTER TABLE b RENAME TO c; INSERT INTO c(v) VALUES ('r');").unwrap();
+    let txs = tail.poll().unwrap();
+    let c: Vec<_> = txs.iter().flat_map(|t| &t.changes).collect();
+    assert_eq!(c.len(), 1, "rename moves no rows: {c:?}");
+    assert_eq!((c[0].table.as_str(), c[0].rowid), ("c", 3));
+    w.execute_batch("DROP TABLE c; INSERT INTO a(x) VALUES (3);").unwrap();
+    let txs = tail.poll().unwrap();
+    let c: Vec<_> = txs.iter().flat_map(|t| &t.changes).collect();
+    assert_eq!(c.len(), 1, "a drop reports no deletes: {c:?}");
+    // keep the mirror honest for the tables that still exist
+    mirror.clear();
+    replay(&mut mirror, &tail.snapshot().unwrap());
+    check(&w, &mut mirror);
+}
+
+#[test]
+fn generated_columns_and_affinity() {
+    let path = temp_db("gen");
+    let w = writer(&path, "");
+    w.execute_batch(
+        "CREATE TABLE g(a INTEGER, b AS (a * 2) VIRTUAL, c REAL GENERATED ALWAYS AS (a * 3) STORED, d TEXT CHECK (CAST(d AS TEXT) = d), e REAL)",
+    )
+    .unwrap();
+    let mut tail = Tail::open(&path).unwrap();
+    w.execute_batch("INSERT INTO g(a, d, e) VALUES (7, 'x', 2)").unwrap();
+    let c = &tail.poll().unwrap()[0].changes[0];
+    assert_eq!(c.columns, ["a", "c", "d", "e"], "virtual columns are not stored and not reported");
+    assert_eq!(c.after.as_ref().unwrap(), &[Value::Integer(7), Value::Real(21.0), Value::Text("x".into()), Value::Real(2.0)]);
+}
+
+#[test]
+fn utf16_database() {
+    let path = temp_db("utf16");
+    let w = writer(&path, "PRAGMA encoding='UTF-16le';");
+    w.execute_batch("CREATE TABLE t(s TEXT)").unwrap();
+    let mut tail = Tail::open(&path).unwrap();
+    w.execute_batch("INSERT INTO t VALUES ('héllo wörld ✓')").unwrap();
+    let c = &tail.poll().unwrap()[0].changes[0];
+    assert_eq!(c.after.as_ref().unwrap(), &[Value::Text("héllo wörld ✓".into())]);
+}
+
+#[test]
+fn diff_two_files() {
+    let path = temp_db("diff");
+    let w = writer(&path, "");
+    w.execute_batch(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v);
+         WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<3000) INSERT INTO t(v) SELECT randomblob(i % 900) FROM s;",
+    )
+    .unwrap();
+    let copy = path.with_file_name("copy.db");
+    w.execute(&format!("VACUUM INTO '{}'", copy.display()), []).unwrap();
+    let mut mirror = truth(&w);
+    w.execute_batch("DELETE FROM t WHERE id BETWEEN 100 AND 1900; UPDATE t SET v = 42 WHERE id % 97 = 0; INSERT INTO t(v) VALUES (1);").unwrap();
+    // diff reads the committed log too, so no checkpoint is needed
+    let changes = tailite::diff(&copy, &path).unwrap();
+    replay(&mut mirror, &changes);
+    check(&w, &mut mirror);
+    assert!(tailite::diff(&path, &path).unwrap().is_empty());
+}
+
+#[test]
+fn refuses_rollback_journal_databases() {
+    let path = temp_db("journal");
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("CREATE TABLE t(x)").unwrap();
+    let err = Tail::open(&path).err().expect("must refuse").to_string();
+    assert!(err.contains("WAL"), "{err}");
+}
