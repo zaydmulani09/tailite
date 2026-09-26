@@ -57,6 +57,19 @@ pub enum Value {
     Blob(Vec<u8>),
 }
 
+/// Renders as an SQL literal: `NULL`, `42`, `1.5`, `'it''s'`, `X'00ff'`.
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Null => f.write_str("NULL"),
+            Value::Integer(i) => write!(f, "{i}"),
+            Value::Real(x) => write!(f, "{x:?}"),
+            Value::Text(s) => write!(f, "'{}'", s.replace('\'', "''")),
+            Value::Blob(b) => write!(f, "X'{}'", b.iter().map(|x| format!("{x:02x}")).collect::<String>()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     Insert,
