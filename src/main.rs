@@ -74,9 +74,6 @@ fn main() -> ExitCode {
 fn watch(o: Opts) -> Result<(), String> {
     let [db] = o.files.as_slice() else { return Err("watch takes exactly one database".into()) };
     let mut tail = tailite::Tail::open(db).map_err(|e| e.to_string())?;
-    for t in tail.skipped_tables() {
-        eprintln!("tailite: note: {t} is a WITHOUT ROWID table and is not followed");
-    }
     eprintln!("tailite: following {db}");
     let mut out = io::stdout().lock();
     if o.snapshot {
@@ -128,7 +125,13 @@ fn human(tx: Option<u64>, c: &Change) -> String {
         }
     };
     let row = |vals: &[Value]| c.columns.iter().zip(vals).map(|(k, v)| format!("{k}={}", short(v))).collect::<Vec<_>>().join(" ");
-    let head = format!("{}{} {} rowid={}", tx.map(|t| format!("tx {t}  ")).unwrap_or_default(), c.table, op(c.op).to_uppercase(), c.rowid);
+    let head = format!(
+        "{}{} {}{}",
+        tx.map(|t| format!("tx {t}  ")).unwrap_or_default(),
+        c.table,
+        op(c.op).to_uppercase(),
+        c.rowid.map(|r| format!(" rowid={r}")).unwrap_or_default()
+    );
     match (c.op, &c.before, &c.after) {
         (Op::Update, Some(b), Some(a)) => {
             let changed: Vec<String> = c
@@ -196,7 +199,7 @@ fn json(tx: Option<u64>, c: &Change) -> String {
         tx.map(|t| format!("\"tx\":{t},")).unwrap_or_default(),
         json_str(&c.table),
         op(c.op),
-        c.rowid,
+        c.rowid.map_or("null".into(), |r| r.to_string()),
         obj(&c.before),
         obj(&c.after)
     )
@@ -211,7 +214,7 @@ mod tests {
         let c = Change {
             table: "t\"q".into(),
             op: Op::Update,
-            rowid: 7,
+            rowid: Some(7),
             columns: vec!["a".into(), "b".into(), "c".into()],
             before: Some(vec![Value::Text("x\ny".into()), Value::Real(1.0), Value::Blob(vec![0, 255])]),
             after: Some(vec![Value::Null, Value::Real(f64::INFINITY), Value::Integer(-3)]),

@@ -17,14 +17,26 @@ pub(crate) struct Table {
     /// and converts them back when read.
     pub real: Vec<bool>,
     pub without_rowid: bool,
+    /// WITHOUT ROWID only: primary key columns, in key order. The record stores
+    /// these first, then the remaining columns in declared order.
+    pub pk: Vec<usize>,
 }
 
 impl Table {
     /// Turn a raw record into a full row in declared column order.
     pub fn row(&self, rowid: i64, mut values: Vec<Value>) -> Vec<Value> {
-        values.truncate(self.columns.len());
-        let have = values.len();
-        values.extend(self.defaults[have..].iter().cloned());
+        if self.without_rowid {
+            let order = self.pk.iter().copied().chain((0..self.columns.len()).filter(|i| !self.pk.contains(i)));
+            let mut out = self.defaults.clone();
+            for (v, i) in values.into_iter().zip(order) {
+                out[i] = v;
+            }
+            values = out;
+        } else {
+            values.truncate(self.columns.len());
+            let have = values.len();
+            values.extend(self.defaults[have..].iter().cloned());
+        }
         if let Some(i) = self.rowid_alias {
             values[i] = Value::Integer(rowid);
         }
@@ -41,10 +53,8 @@ impl Table {
 pub(crate) struct Schema {
     /// Schema cookie (db header offset 40); bumped by SQLite on every DDL.
     pub cookie: u32,
-    /// Rowid tables that hold data (virtual tables have no root page and are skipped).
+    /// Tables that hold data (virtual tables have no root page and are skipped).
     pub tables: Vec<Table>,
-    /// WITHOUT ROWID tables, which are not tracked yet.
-    pub skipped: Vec<String>,
 }
 
 impl Schema {
@@ -63,7 +73,7 @@ pub(crate) fn load(pages: &Pages) -> Result<Schema> {
     let mut rows = Vec::new();
     format::scan(pages, 1, &mut |pgno, page| {
         if format::page_type(page, pgno) == format::LEAF_TABLE {
-            for cell in format::table_leaf_cells(page, pgno, pages.geo)? {
+            for cell in format::cells(page, pgno, pages.geo)? {
                 let (data, _) = format::payload(pages, &cell)?;
                 rows.push(format::record(&data, pages.geo.encoding)?);
             }
@@ -85,11 +95,7 @@ pub(crate) fn load(pages: &Pages) -> Result<Schema> {
         let mut t = parse_create_table(&text(4));
         t.name = text(1);
         t.root = root;
-        if t.without_rowid {
-            schema.skipped.push(t.name);
-        } else {
-            schema.tables.push(t);
-        }
+        schema.tables.push(t);
     }
     Ok(schema)
 }
@@ -193,7 +199,7 @@ fn literal(toks: &[Tok]) -> Value {
 /// Parse the parts of a CREATE TABLE statement that affect how records decode.
 pub(crate) fn parse_create_table(sql: &str) -> Table {
     let toks = tokenize(sql);
-    let mut t = Table { name: String::new(), root: 0, columns: vec![], defaults: vec![], rowid_alias: None, real: vec![], without_rowid: false };
+    let mut t = Table { name: String::new(), root: 0, columns: vec![], defaults: vec![], rowid_alias: None, real: vec![], without_rowid: false, pk: vec![] };
     let Some(open) = toks.iter().position(|x| *x == Tok::Punct('(')) else { return t };
     // split the parenthesised body into top-level comma-separated definitions
     let (mut defs, mut cur, mut depth, mut end) = (vec![], vec![], 0, toks.len());
@@ -218,6 +224,7 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
 
     let mut types = vec![];
     let mut table_pk: Vec<String> = vec![];
+    let mut column_pk = None;
     for def in defs.iter().filter(|d| !d.is_empty()) {
         if TABLE_CONSTRAINTS.iter().any(|k| kw(def.first(), k)) {
             if let Some(p) = def.iter().position(|x| kw(Some(x), "PRIMARY")) {
@@ -263,6 +270,9 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
         }
         let pk =rest.iter().position(|x| kw(Some(x), "PRIMARY"));
         let desc = pk.is_some_and(|p| kw(rest.get(p + 2), "DESC"));
+        if pk.is_some() {
+            column_pk = Some(t.columns.len());
+        }
         if pk.is_some() && !desc && ty.join(" ") == "INTEGER" {
             t.rowid_alias = Some(t.columns.len());
         }
@@ -293,6 +303,10 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
     }
     if t.without_rowid {
         t.rowid_alias = None;
+        t.pk = match column_pk {
+            Some(i) => vec![i],
+            None => table_pk.iter().filter_map(|k| t.columns.iter().position(|c| c.eq_ignore_ascii_case(k))).collect(),
+        };
     }
     t
 }
@@ -331,5 +345,10 @@ mod tests {
         let w = parse_create_table("CREATE TABLE t(a INTEGER PRIMARY KEY, b) WITHOUT ROWID, STRICT");
         assert!(w.without_rowid);
         assert_eq!(w.rowid_alias, None);
+        assert_eq!(w.pk, [0]);
+        let w = parse_create_table("CREATE TABLE t(a, b, c, PRIMARY KEY(c, a)) WITHOUT ROWID");
+        assert_eq!(w.pk, [2, 0]);
+        // stored as c, a, b
+        assert_eq!(w.row(0, vec![Value::Integer(3), Value::Integer(1), Value::Integer(2)]), [Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
     }
 }

@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 pub struct Transaction {
     /// Position in the stream, counting from 1 at [`Tail::open`].
     pub seq: u64,
-    /// Changed rows, ordered by table name then rowid. SQLite does not record
+    /// Changed rows, ordered by table name then rowid (or key). SQLite does not record
     /// statement order inside a transaction, so neither can a log reader.
     pub changes: Vec<Change>,
 }
@@ -168,11 +168,6 @@ impl Tail {
     /// without gap or overlap: the state it reads is pinned, so nothing slips between.
     pub fn snapshot(&self) -> Result<Vec<Change>> {
         self.tracker.snapshot(&self.files.pages(None))
-    }
-
-    /// Tables tailite sees but cannot decode yet (WITHOUT ROWID).
-    pub fn skipped_tables(&self) -> &[String] {
-        &self.tracker.schema.skipped
     }
 
     /// Process every transaction committed since the last poll. Never blocks on the

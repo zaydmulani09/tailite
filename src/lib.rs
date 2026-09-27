@@ -10,7 +10,7 @@
 //! loop {
 //!     for tx in tail.poll()? {
 //!         for change in &tx.changes {
-//!             println!("{} {:?} rowid={}", change.table, change.op, change.rowid);
+//!             println!("{} {:?} {:?}", change.table, change.op, change.after);
 //!         }
 //!     }
 //!     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -82,7 +82,9 @@ pub enum Op {
 pub struct Change {
     pub table: String,
     pub op: Op,
-    pub rowid: i64,
+    /// The row's rowid; `None` for WITHOUT ROWID tables, whose rows are identified by
+    /// their primary key columns.
+    pub rowid: Option<i64>,
     /// Column names, in declaration order. `before`/`after` line up with these.
     pub columns: Vec<String>,
     /// Row image before the transaction (`None` for inserts).

@@ -8,6 +8,7 @@ use std::io;
 
 pub(crate) const INTERIOR_INDEX: u8 = 0x02;
 pub(crate) const INTERIOR_TABLE: u8 = 0x05;
+pub(crate) const LEAF_INDEX: u8 = 0x0a;
 pub(crate) const LEAF_TABLE: u8 = 0x0d;
 
 /// Positioned read that works on unix and windows without moving a shared cursor.
@@ -105,6 +106,10 @@ pub(crate) fn page_type(page: &[u8], pgno: u32) -> u8 {
     page.get(hdr(pgno)).copied().unwrap_or(0)
 }
 
+pub(crate) fn is_interior(page: &[u8], pgno: u32) -> bool {
+    matches!(page_type(page, pgno), INTERIOR_TABLE | INTERIOR_INDEX)
+}
+
 /// Child page numbers of an interior page (table or index), right-most child last.
 pub(crate) fn children(page: &[u8], pgno: u32) -> Result<Vec<u32>> {
     let h = hdr(pgno);
@@ -127,14 +132,15 @@ pub(crate) fn scan(pages: &Pages, root: u32, f: &mut dyn FnMut(u32, &[u8]) -> Re
         }
         let page = pages.page(pgno)?;
         f(pgno, &page)?;
-        if matches!(page_type(&page, pgno), INTERIOR_TABLE | INTERIOR_INDEX) {
+        if is_interior(&page, pgno) {
             stack.extend(children(&page, pgno)?.into_iter().map(|c| (c, depth + 1)));
         }
     }
     Ok(())
 }
 
-/// A table-leaf cell with its payload still split between the page and an overflow chain.
+/// A cell with its payload still split between the page and an overflow chain.
+/// `rowid` is only meaningful on table leaves.
 pub(crate) struct Cell<'a> {
     pub rowid: i64,
     pub size: usize,
@@ -158,18 +164,30 @@ fn local_size(g: Geometry, size: usize, table_leaf: bool) -> usize {
     }
 }
 
-pub(crate) fn table_leaf_cells(page: &[u8], pgno: u32, g: Geometry) -> Result<Vec<Cell<'_>>> {
+/// Payload-carrying cells: table leaves (keyed by rowid) and both kinds of index page,
+/// whose cells are whole records. Interior table pages carry no payload.
+pub(crate) fn cells(page: &[u8], pgno: u32, g: Geometry) -> Result<Vec<Cell<'_>>> {
     let h = hdr(pgno);
+    let ty = page_type(page, pgno);
+    let (ptrs, skip) = match ty {
+        LEAF_TABLE | LEAF_INDEX => (h + 8, 0),
+        INTERIOR_INDEX => (h + 12, 4), // cell starts with the left child pointer
+        _ => return Ok(vec![]),
+    };
     let n = be16(page, h + 3)?;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let mut off = be16(page, h + 8 + 2 * i)?;
+        let mut off = be16(page, ptrs + 2 * i)? + skip;
         let (size, a) = varint(page, off)?;
         off += a;
-        let (rowid, b) = varint(page, off)?;
-        off += b;
+        let mut rowid = 0;
+        if ty == LEAF_TABLE {
+            let (r, b) = varint(page, off)?;
+            off += b;
+            rowid = r;
+        }
         let size = size as usize;
-        let local = local_size(g, size, true);
+        let local = local_size(g, size, ty == LEAF_TABLE);
         let body = page.get(off..off + local).ok_or_else(|| corrupt("cell overruns page"))?;
         let overflow = if local < size { be32(page, off + local)? } else { 0 };
         out.push(Cell { rowid: rowid as i64, size, local: body, overflow });

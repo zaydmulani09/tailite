@@ -16,20 +16,28 @@
 //!    rows that were deleted, and we read those (plus whatever hangs below them).
 //!
 //! Rows are then collected from the old and new images of changed pages and orphans
-//! and diffed by rowid within each table. Cost is O(changed pages x tree depth) plus
+//! and diffed by key (rowid, or primary key for WITHOUT ROWID) within each table. Cost is O(changed pages x tree depth) plus
 //! the pages that were actually freed, never a table scan.
 //!
 //! One more index maps overflow pages to the row that owns them: SQLite overwrites a
 //! same-size payload in place, so a blob update can change only an overflow page and
 //! leave the leaf byte-identical.
 
-use crate::format::{self, Pages, INTERIOR_TABLE, LEAF_TABLE};
+use crate::format::{self, Cell, Pages, LEAF_TABLE};
 use crate::schema::{self, Schema, Table};
 use crate::{Change, Op, Result, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Where an overflow page's payload lives: (table root, rowid, leaf page).
-type OverflowOwner = (u32, i64, u32);
+/// Row identity within a table: the rowid, or for WITHOUT ROWID tables the primary key
+/// values (compared through their debug rendering, which is exact for stored values).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Key {
+    Rowid(i64),
+    Pk(String),
+}
+
+/// Where an overflow page's payload lives: (table root, row key, page holding the cell).
+type OverflowOwner = (u32, Key, u32);
 
 pub(crate) struct Tracker {
     pub schema: Schema,
@@ -53,8 +61,8 @@ struct Row {
     leaf: u32,
 }
 
-/// table name -> rowid -> row
-type Rows = HashMap<String, BTreeMap<i64, Row>>;
+/// table name -> key -> row
+type Rows = HashMap<String, BTreeMap<Key, Row>>;
 
 impl Tracker {
     /// Walk every rowid table (and the schema table itself) from its root.
@@ -63,24 +71,24 @@ impl Tracker {
         let mut t = Tracker { owner: HashMap::new(), parent: HashMap::new(), overflow: HashMap::new(), schema };
         let roots: Vec<u32> = std::iter::once(1).chain(t.schema.tables.iter().map(|t| t.root)).collect();
         for root in roots {
+            let table = t.schema.by_root(root).cloned();
             format::scan(pages, root, &mut |pgno, page| {
                 t.owner.insert(pgno, root);
-                match format::page_type(page, pgno) {
-                    INTERIOR_TABLE => {
-                        for c in format::children(page, pgno)? {
-                            t.parent.insert(c, pgno);
+                if format::is_interior(page, pgno) {
+                    for c in format::children(page, pgno)? {
+                        t.parent.insert(c, pgno);
+                    }
+                }
+                for cell in format::cells(page, pgno, pages.geo)? {
+                    if cell.overflow != 0 {
+                        let key = match &table {
+                            Some(tb) => decode(pages, tb, &cell)?.0,
+                            None => Key::Rowid(cell.rowid), // sqlite_schema
+                        };
+                        for o in format::payload(pages, &cell)?.1 {
+                            t.overflow.insert(o, (root, key.clone(), pgno));
                         }
                     }
-                    LEAF_TABLE => {
-                        for cell in format::table_leaf_cells(page, pgno, pages.geo)? {
-                            if cell.overflow != 0 {
-                                for o in format::payload(pages, &cell)?.1 {
-                                    t.overflow.insert(o, (root, cell.rowid, pgno));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
                 }
                 Ok(())
             })?;
@@ -119,7 +127,7 @@ impl Tracker {
         while let Some(q) = stack.pop() {
             let t = assign[&q];
             let img = new.page(q)?;
-            if format::page_type(&img, q) != INTERIOR_TABLE {
+            if !format::is_interior(&img, q) {
                 continue;
             }
             for c in format::children(&img, q)? {
@@ -135,7 +143,7 @@ impl Tracker {
         let mut todo: Vec<u32> = path.iter().copied().collect();
         for &p in changed.iter().filter(|p| self.owner.contains_key(p)) {
             let img = old.page(p)?;
-            if format::page_type(&img, p) == INTERIOR_TABLE {
+            if format::is_interior(&img, p) {
                 todo.extend(format::children(&img, p)?);
             }
         }
@@ -145,7 +153,7 @@ impl Tracker {
                 continue;
             }
             let img = old.page(p)?;
-            if format::page_type(&img, p) == INTERIOR_TABLE {
+            if format::is_interior(&img, p) {
                 todo.extend(format::children(&img, p)?);
             }
         }
@@ -175,9 +183,9 @@ impl Tracker {
         }
         for (name, rows) in &new_rows {
             let root = self.schema.tables.iter().find(|t| &t.name == name).map_or(0, |t| t.root);
-            for (&rowid, row) in rows {
+            for (key, row) in rows {
                 for &o in &row.chain {
-                    self.overflow.insert(o, (root, rowid, row.leaf));
+                    self.overflow.insert(o, (root, key.clone(), row.leaf));
                 }
             }
         }
@@ -244,10 +252,10 @@ impl Tracker {
             leaf_rows(after, p, None, &mut new_rows)?;
         }
         for p in scope {
-            if let Some(&(_, rowid, leaf)) = self.overflow.get(p) {
-                if !scope.contains(&leaf) {
-                    leaf_rows(before, leaf, Some(rowid), &mut old_rows)?;
-                    leaf_rows(after, leaf, Some(rowid), &mut new_rows)?;
+            if let Some((_, key, leaf)) = self.overflow.get(p) {
+                if !scope.contains(leaf) {
+                    leaf_rows(before, *leaf, Some(key), &mut old_rows)?;
+                    leaf_rows(after, *leaf, Some(key), &mut new_rows)?;
                 }
             }
         }
@@ -255,23 +263,36 @@ impl Tracker {
     }
 }
 
-/// Decode the rows on `pgno` if, on this side, it is a leaf of a tracked table.
-fn leaf_rows(side: &Side, pgno: u32, only: Option<i64>, out: &mut Rows) -> Result<()> {
+fn decode(pages: &Pages, table: &Table, cell: &Cell) -> Result<(Key, Vec<Value>, Vec<u32>)> {
+    let (data, chain) = format::payload(pages, cell)?;
+    let rec = format::record(&data, pages.geo.encoding)?;
+    let key = match table.without_rowid {
+        true => Key::Pk(format!("{:?}", &rec[..table.pk.len().min(rec.len())])),
+        false => Key::Rowid(cell.rowid),
+    };
+    Ok((key, table.row(cell.rowid, rec), chain))
+}
+
+/// Decode the rows stored on `pgno` if, on this side, it belongs to a tracked table:
+/// table leaves for rowid tables, every page of a WITHOUT ROWID table's index b-tree.
+fn leaf_rows(side: &Side, pgno: u32, only: Option<&Key>, out: &mut Rows) -> Result<()> {
     let Some(table) = (side.owner)(pgno).and_then(|root| side.schema.by_root(root)) else {
         return Ok(());
     };
     let img = side.pages.page(pgno)?;
-    if format::page_type(&img, pgno) != LEAF_TABLE {
+    if (format::page_type(&img, pgno) == LEAF_TABLE) == table.without_rowid {
         return Ok(());
     }
     let rows = out.entry(table.name.clone()).or_default();
-    for cell in format::table_leaf_cells(&img, pgno, side.pages.geo)? {
-        if only.is_some_and(|r| r != cell.rowid) {
+    for cell in format::cells(&img, pgno, side.pages.geo)? {
+        if only.is_some_and(|k| *k != Key::Rowid(cell.rowid)) && !table.without_rowid {
             continue;
         }
-        let (data, chain) = format::payload(side.pages, &cell)?;
-        let values = table.row(cell.rowid, format::record(&data, side.pages.geo.encoding)?);
-        rows.insert(cell.rowid, Row { values, chain, leaf: pgno });
+        let (key, values, chain) = decode(side.pages, table, &cell)?;
+        if only.is_some_and(|k| *k != key) {
+            continue;
+        }
+        rows.insert(key, Row { values, chain, leaf: pgno });
     }
     Ok(())
 }
@@ -286,17 +307,23 @@ fn diff(old_schema: &Schema, new_schema: &Schema, mut old_rows: Rows, mut new_ro
         let before = old_rows.remove(&name).unwrap_or_default();
         let mut after = new_rows.remove(&name).unwrap_or_default();
         let columns = find(new_schema, &name).or_else(|| find(old_schema, &name)).map(|t| t.columns).unwrap_or_default();
-        let mut ops: BTreeMap<i64, Change> = BTreeMap::new();
-        for (rowid, b) in before {
-            let change = match after.remove(&rowid) {
+        let mut ops: BTreeMap<Key, Change> = BTreeMap::new();
+        let rowid = |k: &Key| match k {
+            Key::Rowid(r) => Some(*r),
+            Key::Pk(_) => None,
+        };
+        for (key, b) in before {
+            let change = match after.remove(&key) {
                 Some(a) if a.values == b.values => continue,
                 Some(a) => (Op::Update, Some(b.values), Some(a.values)),
                 None => (Op::Delete, Some(b.values), None),
             };
-            ops.insert(rowid, Change { table: name.clone(), op: change.0, rowid, columns: columns.clone(), before: change.1, after: change.2 });
+            let c = Change { table: name.clone(), op: change.0, rowid: rowid(&key), columns: columns.clone(), before: change.1, after: change.2 };
+            ops.insert(key, c);
         }
-        for (rowid, a) in after {
-            ops.insert(rowid, Change { table: name.clone(), op: Op::Insert, rowid, columns: columns.clone(), before: None, after: Some(a.values) });
+        for (key, a) in after {
+            let c = Change { table: name.clone(), op: Op::Insert, rowid: rowid(&key), columns: columns.clone(), before: None, after: Some(a.values) };
+            ops.insert(key, c);
         }
         out.extend(ops.into_values());
     }
