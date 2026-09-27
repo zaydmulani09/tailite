@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use tailite::{Change, Op, Tail, Value};
 
-type Mirror = HashMap<String, BTreeMap<i64, Vec<Value>>>;
+/// table -> row key (rowid, or the first column for WITHOUT ROWID tables) -> row
+type Mirror = HashMap<String, BTreeMap<String, Vec<Value>>>;
 
 fn temp_db(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tailite-test-{}-{name}", std::process::id()));
@@ -36,19 +37,24 @@ fn value(v: ValueRef) -> Value {
 /// Every rowid table, as SQLite sees it.
 fn truth(c: &Connection) -> Mirror {
     let mut names = c.prepare("SELECT name, sql FROM sqlite_schema WHERE type='table' AND rootpage>0").unwrap();
-    let names: Vec<String> = names
+    let names: Vec<(String, bool)> = names
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
         .unwrap()
         .map(|r| r.unwrap())
-        .filter(|(_, sql)| !sql.as_deref().unwrap_or("").to_uppercase().contains("WITHOUT ROWID"))
-        .map(|(n, _)| n)
+        .map(|(n, sql)| (n, sql.unwrap_or_default().to_uppercase().contains("WITHOUT ROWID")))
         .collect();
     let mut m = Mirror::new();
-    for name in names {
-        let mut q = c.prepare(&format!("SELECT _rowid_, * FROM \"{name}\"")).unwrap();
+    for (name, without_rowid) in names {
+        let mut q = c.prepare(&format!("SELECT {}* FROM \"{name}\"", if without_rowid { "" } else { "_rowid_, " })).unwrap();
         let n = q.column_count();
         let rows = q
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, (1..n).map(|i| value(r.get_ref(i).unwrap())).collect())))
+            .query_map([], |r| {
+                let vals: Vec<Value> = (0..n).map(|i| value(r.get_ref(i).unwrap())).collect();
+                Ok(match without_rowid {
+                    true => (format!("{:?}", vals[0]), vals),
+                    false => (format!("{:?}", vals[0]), vals[1..].to_vec()),
+                })
+            })
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -57,20 +63,28 @@ fn truth(c: &Connection) -> Mirror {
     m
 }
 
+fn key(c: &Change) -> String {
+    match c.rowid {
+        Some(r) => format!("{:?}", Value::Integer(r)),
+        None => format!("{:?}", c.after.as_ref().or(c.before.as_ref()).unwrap()[0]),
+    }
+}
+
 fn replay(m: &mut Mirror, changes: &[Change]) {
     for c in changes {
+        let k = key(c);
         let t = m.entry(c.table.clone()).or_default();
         match c.op {
             Op::Insert => {
-                assert!(t.insert(c.rowid, c.after.clone().unwrap()).is_none(), "insert of existing row {c:?}");
+                assert!(t.insert(k, c.after.clone().unwrap()).is_none(), "insert of existing row {c:?}");
             }
             Op::Update => {
-                let prev = t.insert(c.rowid, c.after.clone().unwrap());
-                assert_eq!(prev.as_ref(), c.before.as_ref(), "update before-image mismatch on {}#{}", c.table, c.rowid);
+                let prev = t.insert(k, c.after.clone().unwrap());
+                assert_eq!(prev.as_ref(), c.before.as_ref(), "update before-image mismatch on {}#{:?}", c.table, c.rowid);
             }
             Op::Delete => {
-                let prev = t.remove(&c.rowid);
-                assert_eq!(prev.as_ref(), c.before.as_ref(), "delete before-image mismatch on {}#{}", c.table, c.rowid);
+                let prev = t.remove(&k);
+                assert_eq!(prev.as_ref(), c.before.as_ref(), "delete before-image mismatch on {}#{:?}", c.table, c.rowid);
             }
         }
     }
@@ -94,15 +108,15 @@ fn check(c: &Connection, m: &mut Mirror) {
         for (name, rows) in &t {
             let mine = m.get(name).cloned().unwrap_or_default();
             if &mine != rows {
-                let missing: Vec<_> = rows.keys().filter(|k| !mine.contains_key(k)).take(5).collect();
-                let extra: Vec<_> = mine.keys().filter(|k| !rows.contains_key(k)).take(5).collect();
-                let differ: Vec<_> = rows.iter().filter(|(k, v)| mine.get(k).is_some_and(|x| x != *v)).map(|(k, _)| k).take(5).collect();
+                let missing: Vec<_> = rows.keys().filter(|k| !mine.contains_key(*k)).take(5).collect();
+                let extra: Vec<_> = mine.keys().filter(|k| !rows.contains_key(*k)).take(5).collect();
+                let differ: Vec<_> = rows.iter().filter(|(k, v)| mine.get(*k).is_some_and(|x| x != *v)).map(|(k, _)| k).take(5).collect();
                 let show = |v: &Vec<Value>| -> String {
                     v.iter().map(|x| match x { Value::Blob(b) => format!("blob[{}:{:02x?}..]", b.len(), &b[..b.len().min(4)]), o => format!("{o:?}") }).collect::<Vec<_>>().join(", ")
                 };
                 let detail = differ.first().map(|k| format!("
  mine: {}
- want: {}", show(&mine[k]), show(&rows[k]))).unwrap_or_default();
+ want: {}", show(&mine[*k]), show(&rows[*k]))).unwrap_or_default();
                 panic!("table {name}: {} rows vs {} expected; missing {missing:?} extra {extra:?} differ {differ:?}{detail}", mine.len(), rows.len());
             }
         }
@@ -134,7 +148,7 @@ fn basic_insert_update_delete() {
     assert_eq!(txs[0].changes[0].before.as_ref().unwrap()[1], Value::Text("ada".into()));
     assert_eq!(txs[0].changes[0].after.as_ref().unwrap()[1], Value::Text("Ada".into()));
     assert_eq!(txs[1].changes[0].op, Op::Delete);
-    assert_eq!(txs[1].changes[0].rowid, 2);
+    assert_eq!(txs[1].changes[0].rowid, Some(2));
 }
 
 #[test]
@@ -182,6 +196,7 @@ fn random_workload(name: &str, pragmas: &str, seed: u64, steps: usize) {
          CREATE TABLE t3(k TEXT PRIMARY KEY, v);
          CREATE TABLE t4(id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT);
          CREATE INDEX t1_a ON t1(a);
+         CREATE TABLE w1(k TEXT PRIMARY KEY, v, n INTEGER) WITHOUT ROWID;
          INSERT INTO t1(a, b, c) VALUES ('seed', zeroblob(10), 0.5);",
     )
     .unwrap();
@@ -222,6 +237,13 @@ fn random_workload(name: &str, pragmas: &str, seed: u64, steps: usize) {
             }
             93..=94 if extra_tables > 0 => format!("DROP TABLE IF EXISTS x{}", 1 + rng.below(extra_tables)),
             95 => "UPDATE t2 SET y = y || y WHERE rowid % 5 = 0".into(),
+            96..=97 => format!(
+                "INSERT OR REPLACE INTO w1 VALUES ('w{}', randomblob({}), {})",
+                rng.below(400),
+                [5, 200, 3000][rng.below(3) as usize],
+                rng.below(9)
+            ),
+            98 => format!("DELETE FROM w1 WHERE n = {}; UPDATE w1 SET v = randomblob(length(v)) WHERE n = {};", rng.below(9), rng.below(9)),
             _ => "INSERT INTO t1(a, b) SELECT a, b FROM t1 ORDER BY random() LIMIT 30".into(),
         };
         // checkpoints report busy through a result row rather than an error
@@ -306,7 +328,7 @@ fn schema_changes_are_followed() {
     let txs = tail.poll().unwrap();
     let c: Vec<_> = txs.iter().flat_map(|t| &t.changes).collect();
     assert_eq!(c.len(), 1, "rename moves no rows: {c:?}");
-    assert_eq!((c[0].table.as_str(), c[0].rowid), ("c", 3));
+    assert_eq!((c[0].table.as_str(), c[0].rowid), ("c", Some(3)));
     w.execute_batch("DROP TABLE c; INSERT INTO a(x) VALUES (3);").unwrap();
     let txs = tail.poll().unwrap();
     let c: Vec<_> = txs.iter().flat_map(|t| &t.changes).collect();
@@ -370,4 +392,26 @@ fn refuses_rollback_journal_databases() {
     c.execute_batch("CREATE TABLE t(x)").unwrap();
     let err = Tail::open(&path).err().expect("must refuse").to_string();
     assert!(err.contains("WAL"), "{err}");
+}
+
+#[test]
+fn without_rowid_composite_key() {
+    let path = temp_db("wr");
+    let w = writer(&path, "PRAGMA page_size=1024;");
+    w.execute_batch("CREATE TABLE edges(src TEXT, weight REAL, dst TEXT, PRIMARY KEY(dst, src)) WITHOUT ROWID").unwrap();
+    let mut tail = Tail::open(&path).unwrap();
+    w.execute_batch(
+        "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<500)
+         INSERT INTO edges SELECT 'n' || (i % 37), i, 'n' || i || hex(randomblob(i % 50)) FROM s",
+    )
+    .unwrap();
+    let txs = tail.poll().unwrap();
+    assert_eq!(txs[0].changes.len(), 500, "rows in interior index pages count too");
+    assert!(txs[0].changes.iter().all(|c| c.rowid.is_none() && c.columns == ["src", "weight", "dst"]));
+    w.execute_batch("UPDATE edges SET weight = -weight WHERE src = 'n3'; DELETE FROM edges WHERE src = 'n4';").unwrap();
+    let txs = tail.poll().unwrap();
+    let upd = &txs[0].changes;
+    assert!(!upd.is_empty() && upd.iter().all(|c| c.op == Op::Update && c.after.as_ref().unwrap()[0] == Value::Text("n3".into())));
+    assert!(matches!(upd[0].after.as_ref().unwrap()[1], Value::Real(x) if x < 0.0));
+    assert!(txs[1].changes.iter().all(|c| c.op == Op::Delete));
 }
