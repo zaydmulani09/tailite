@@ -55,6 +55,12 @@ struct Side<'a> {
     owner: &'a dyn Fn(u32) -> Option<u32>,
 }
 
+impl Side<'_> {
+    fn table(&self, pgno: u32) -> Option<&Table> {
+        (self.owner)(pgno).and_then(|root| self.schema.by_root(root))
+    }
+}
+
 struct Row {
     values: Vec<Value>,
     chain: Vec<u32>,
@@ -130,9 +136,15 @@ impl Tracker {
             if !format::is_interior(&img, q) {
                 continue;
             }
+            let rewritten = changed.contains(&q);
             for c in format::children(&img, q)? {
+                let follow = changed.contains(&c) || path.contains(&c);
+                // an unchanged page still has its old children: only re-walk the paths
+                if !rewritten && !follow {
+                    continue;
+                }
                 new_parent.insert(c, q);
-                if assign.insert(c, t).is_none() && (changed.contains(&c) || path.contains(&c)) {
+                if assign.insert(c, t).is_none() && follow {
                     stack.push(c);
                 }
             }
@@ -201,7 +213,7 @@ impl Tracker {
         let side = Side { pages, schema: &self.schema, owner: &owner };
         let mut rows = Rows::new();
         for &p in self.owner.keys() {
-            leaf_rows(&side, p, None, &mut rows)?;
+            leaf_rows(&side, p, &pages.page(p)?, None, &HashSet::new(), &mut rows)?;
         }
         Ok(diff(&self.schema, &self.schema, Rows::new(), rows))
     }
@@ -248,14 +260,34 @@ impl Tracker {
         let mut old_rows = Rows::new();
         let mut new_rows = Rows::new();
         for &p in scope {
-            leaf_rows(before, p, None, &mut old_rows)?;
-            leaf_rows(after, p, None, &mut new_rows)?;
+            let (a, b) = (before.pages.page(p)?, after.pages.page(p)?);
+            // A cell that is byte-identical on both images of a page of the same table is
+            // an untouched row: skip decoding it. Cells with an overflow chain are always
+            // decoded, since SQLite can rewrite the chain in place under the same cell.
+            let same = |p| before.table(p).is_some_and(|t| after.table(p).is_some_and(|u| t.name == u.name));
+            let mut unchanged = HashSet::new();
+            if a != b && same(p) {
+                let geo = before.pages.geo;
+                let old: HashMap<usize, (i64, &[u8])> = format::cells(&a, p, geo)?
+                    .into_iter()
+                    .filter(|c| c.overflow == 0)
+                    .map(|c| (c.off, (c.rowid, c.local)))
+                    .collect();
+                for c in format::cells(&b, p, geo)? {
+                    if c.overflow == 0 && old.get(&c.off) == Some(&(c.rowid, c.local)) {
+                        unchanged.insert(c.off);
+                    }
+                }
+            }
+            leaf_rows(before, p, &a, None, &unchanged, &mut old_rows)?;
+            leaf_rows(after, p, &b, None, &unchanged, &mut new_rows)?;
         }
         for p in scope {
             if let Some((_, key, leaf)) = self.overflow.get(p) {
                 if !scope.contains(leaf) {
-                    leaf_rows(before, *leaf, Some(key), &mut old_rows)?;
-                    leaf_rows(after, *leaf, Some(key), &mut new_rows)?;
+                    let none = HashSet::new();
+                    leaf_rows(before, *leaf, &before.pages.page(*leaf)?, Some(key), &none, &mut old_rows)?;
+                    leaf_rows(after, *leaf, &after.pages.page(*leaf)?, Some(key), &none, &mut new_rows)?;
                 }
             }
         }
@@ -275,17 +307,23 @@ fn decode(pages: &Pages, table: &Table, cell: &Cell) -> Result<(Key, Vec<Value>,
 
 /// Decode the rows stored on `pgno` if, on this side, it belongs to a tracked table:
 /// table leaves for rowid tables, every page of a WITHOUT ROWID table's index b-tree.
-fn leaf_rows(side: &Side, pgno: u32, only: Option<&Key>, out: &mut Rows) -> Result<()> {
-    let Some(table) = (side.owner)(pgno).and_then(|root| side.schema.by_root(root)) else {
+fn leaf_rows(
+    side: &Side,
+    pgno: u32,
+    img: &[u8],
+    only: Option<&Key>,
+    skip: &HashSet<usize>,
+    out: &mut Rows,
+) -> Result<()> {
+    let Some(table) = side.table(pgno) else {
         return Ok(());
     };
-    let img = side.pages.page(pgno)?;
-    if (format::page_type(&img, pgno) == LEAF_TABLE) == table.without_rowid {
+    if (format::page_type(img, pgno) == LEAF_TABLE) == table.without_rowid {
         return Ok(());
     }
     let rows = out.entry(table.name.clone()).or_default();
-    for cell in format::cells(&img, pgno, side.pages.geo)? {
-        if only.is_some_and(|k| *k != Key::Rowid(cell.rowid)) && !table.without_rowid {
+    for cell in format::cells(img, pgno, side.pages.geo)? {
+        if only.is_some_and(|k| *k != Key::Rowid(cell.rowid)) && !table.without_rowid || skip.contains(&cell.off) {
             continue;
         }
         let (key, values, chain) = decode(side.pages, table, &cell)?;

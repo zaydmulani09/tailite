@@ -143,6 +143,8 @@ pub(crate) fn scan(pages: &Pages, root: u32, f: &mut dyn FnMut(u32, &[u8]) -> Re
 /// `rowid` is only meaningful on table leaves.
 pub(crate) struct Cell<'a> {
     pub rowid: i64,
+    /// offset of the payload within the page
+    pub off: usize,
     pub size: usize,
     pub local: &'a [u8],
     pub overflow: u32,
@@ -190,7 +192,7 @@ pub(crate) fn cells(page: &[u8], pgno: u32, g: Geometry) -> Result<Vec<Cell<'_>>
         let local = local_size(g, size, ty == LEAF_TABLE);
         let body = page.get(off..off + local).ok_or_else(|| corrupt("cell overruns page"))?;
         let overflow = if local < size { be32(page, off + local)? } else { 0 };
-        out.push(Cell { rowid: rowid as i64, size, local: body, overflow });
+        out.push(Cell { rowid: rowid as i64, off, size, local: body, overflow });
     }
     Ok(out)
 }
