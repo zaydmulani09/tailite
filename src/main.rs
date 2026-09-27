@@ -124,7 +124,9 @@ fn human(tx: Option<u64>, c: &Change) -> String {
             s
         }
     };
-    let row = |vals: &[Value]| c.columns.iter().zip(vals).map(|(k, v)| format!("{k}={}", short(v))).collect::<Vec<_>>().join(" ");
+    let row = |vals: &[Value]| {
+        c.columns.iter().zip(vals).map(|(k, v)| format!("{k}={}", short(v))).collect::<Vec<_>>().join(" ")
+    };
     let head = format!(
         "{}{} {}{}",
         tx.map(|t| format!("tx {t}  ")).unwrap_or_default(),
@@ -191,7 +193,12 @@ fn json(tx: Option<u64>, c: &Change) -> String {
         None => "null".to_string(),
         Some(v) => format!(
             "{{{}}}",
-            c.columns.iter().zip(v).map(|(k, v)| format!("{}:{}", json_str(k), json_value(v))).collect::<Vec<_>>().join(",")
+            c.columns
+                .iter()
+                .zip(v)
+                .map(|(k, v)| format!("{}:{}", json_str(k), json_value(v)))
+                .collect::<Vec<_>>()
+                .join(",")
         ),
     };
     format!(

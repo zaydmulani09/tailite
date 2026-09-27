@@ -18,7 +18,6 @@
 //! # Ok::<(), tailite::Error>(())
 //! ```
 
-
 mod format;
 mod schema;
 mod tail;

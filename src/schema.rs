@@ -176,9 +176,9 @@ const TABLE_CONSTRAINTS: &[&str] = &["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK",
 fn literal(toks: &[Tok]) -> Value {
     match toks {
         [Tok::Str(s), ..] => Value::Text(s.clone()),
-        [Tok::Word(x, false), Tok::Str(h), ..] if x.eq_ignore_ascii_case("x") => {
-            Value::Blob((0..h.len() / 2).filter_map(|i| u8::from_str_radix(h.get(2 * i..2 * i + 2)?, 16).ok()).collect())
-        }
+        [Tok::Word(x, false), Tok::Str(h), ..] if x.eq_ignore_ascii_case("x") => Value::Blob(
+            (0..h.len() / 2).filter_map(|i| u8::from_str_radix(h.get(2 * i..2 * i + 2)?, 16).ok()).collect(),
+        ),
         [Tok::Word(w, false), ..] => {
             if w.eq_ignore_ascii_case("true") {
                 Value::Integer(1)
@@ -199,7 +199,16 @@ fn literal(toks: &[Tok]) -> Value {
 /// Parse the parts of a CREATE TABLE statement that affect how records decode.
 pub(crate) fn parse_create_table(sql: &str) -> Table {
     let toks = tokenize(sql);
-    let mut t = Table { name: String::new(), root: 0, columns: vec![], defaults: vec![], rowid_alias: None, real: vec![], without_rowid: false, pk: vec![] };
+    let mut t = Table {
+        name: String::new(),
+        root: 0,
+        columns: vec![],
+        defaults: vec![],
+        rowid_alias: None,
+        real: vec![],
+        without_rowid: false,
+        pk: vec![],
+    };
     let Some(open) = toks.iter().position(|x| *x == Tok::Punct('(')) else { return t };
     // split the parenthesised body into top-level comma-separated definitions
     let (mut defs, mut cur, mut depth, mut end) = (vec![], vec![], 0, toks.len());
@@ -234,7 +243,9 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
                     .skip(1)
                     .take_while(|x| **x != Tok::Punct(')'))
                     .filter_map(|x| match x {
-                        Tok::Word(w, _) if !["ASC", "DESC", "COLLATE"].iter().any(|k| w.eq_ignore_ascii_case(k)) => Some(w.clone()),
+                        Tok::Word(w, _) if !["ASC", "DESC", "COLLATE"].iter().any(|k| w.eq_ignore_ascii_case(k)) => {
+                            Some(w.clone())
+                        }
                         _ => None,
                     })
                     .collect();
@@ -242,7 +253,11 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
             continue;
         }
         let Tok::Word(name, _) = &def[0] else { continue };
-        let cons = def.iter().skip(1).position(|x| COLUMN_CONSTRAINTS.iter().any(|k| kw(Some(x), k))).map_or(def.len(), |p| p + 1);
+        let cons = def
+            .iter()
+            .skip(1)
+            .position(|x| COLUMN_CONSTRAINTS.iter().any(|k| kw(Some(x), k)))
+            .map_or(def.len(), |p| p + 1);
         let ty: Vec<String> = def[1..cons]
             .iter()
             .filter_map(|x| match x {
@@ -268,7 +283,7 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
         if top.iter().any(|x| kw(Some(x), "AS")) && !top.iter().any(|x| kw(Some(x), "STORED")) {
             continue;
         }
-        let pk =rest.iter().position(|x| kw(Some(x), "PRIMARY"));
+        let pk = rest.iter().position(|x| kw(Some(x), "PRIMARY"));
         let desc = pk.is_some_and(|p| kw(rest.get(p + 2), "DESC"));
         if pk.is_some() {
             column_pk = Some(t.columns.len());
@@ -282,14 +297,23 @@ pub(crate) fn parse_create_table(sql: &str) -> Table {
             .map(|p| &rest[p + 1..])
             .map(|v| match v {
                 [Tok::Punct('('), inner @ ..] => literal(inner),
-                [Tok::Word(sign, false), Tok::Word(n, false), ..] if sign == "-" || sign == "+" => literal(&[Tok::Word(format!("{sign}{n}"), false)]),
+                [Tok::Word(sign, false), Tok::Word(n, false), ..] if sign == "-" || sign == "+" => {
+                    literal(&[Tok::Word(format!("{sign}{n}"), false)])
+                }
                 _ => literal(v),
             })
             .unwrap_or(Value::Null);
         // affinity rules, in SQLite's order: INT wins, then text and blob, then REAL
         let ty_s = ty.join(" ");
         let has = |k: &str| ty_s.contains(k);
-        t.real.push(!has("INT") && !has("CHAR") && !has("CLOB") && !has("TEXT") && !has("BLOB") && (has("REAL") || has("FLOA") || has("DOUB")));
+        t.real.push(
+            !has("INT")
+                && !has("CHAR")
+                && !has("CLOB")
+                && !has("TEXT")
+                && !has("BLOB")
+                && (has("REAL") || has("FLOA") || has("DOUB")),
+        );
         types.push(ty_s);
         t.columns.push(name.clone());
         t.defaults.push(default);
@@ -333,7 +357,10 @@ mod tests {
         assert_eq!(t.defaults[3], Value::Blob(vec![0, 255]));
         assert_eq!(t.defaults[4], Value::Integer(1));
         assert!(!t.without_rowid);
-        assert_eq!(parse_create_table("CREATE TABLE t(a REAL, b FLOATING POINT, c DOUBLE PRECISION, d POINT INT, e)").real, [true, false, true, false, false]);
+        assert_eq!(
+            parse_create_table("CREATE TABLE t(a REAL, b FLOATING POINT, c DOUBLE PRECISION, d POINT INT, e)").real,
+            [true, false, true, false, false]
+        );
     }
 
     #[test]
@@ -349,6 +376,9 @@ mod tests {
         let w = parse_create_table("CREATE TABLE t(a, b, c, PRIMARY KEY(c, a)) WITHOUT ROWID");
         assert_eq!(w.pk, [2, 0]);
         // stored as c, a, b
-        assert_eq!(w.row(0, vec![Value::Integer(3), Value::Integer(1), Value::Integer(2)]), [Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        assert_eq!(
+            w.row(0, vec![Value::Integer(3), Value::Integer(1), Value::Integer(2)]),
+            [Value::Integer(1), Value::Integer(2), Value::Integer(3)]
+        );
     }
 }

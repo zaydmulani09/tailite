@@ -45,7 +45,8 @@ fn truth(c: &Connection) -> Mirror {
         .collect();
     let mut m = Mirror::new();
     for (name, without_rowid) in names {
-        let mut q = c.prepare(&format!("SELECT {}* FROM \"{name}\"", if without_rowid { "" } else { "_rowid_, " })).unwrap();
+        let mut q =
+            c.prepare(&format!("SELECT {}* FROM \"{name}\"", if without_rowid { "" } else { "_rowid_, " })).unwrap();
         let n = q.column_count();
         let rows = q
             .query_map([], |r| {
@@ -80,11 +81,23 @@ fn replay(m: &mut Mirror, changes: &[Change]) {
             }
             Op::Update => {
                 let prev = t.insert(k, c.after.clone().unwrap());
-                assert_eq!(prev.as_ref(), c.before.as_ref(), "update before-image mismatch on {}#{:?}", c.table, c.rowid);
+                assert_eq!(
+                    prev.as_ref(),
+                    c.before.as_ref(),
+                    "update before-image mismatch on {}#{:?}",
+                    c.table,
+                    c.rowid
+                );
             }
             Op::Delete => {
                 let prev = t.remove(&k);
-                assert_eq!(prev.as_ref(), c.before.as_ref(), "delete before-image mismatch on {}#{:?}", c.table, c.rowid);
+                assert_eq!(
+                    prev.as_ref(),
+                    c.before.as_ref(),
+                    "delete before-image mismatch on {}#{:?}",
+                    c.table,
+                    c.rowid
+                );
             }
         }
     }
@@ -110,13 +123,33 @@ fn check(c: &Connection, m: &mut Mirror) {
             if &mine != rows {
                 let missing: Vec<_> = rows.keys().filter(|k| !mine.contains_key(*k)).take(5).collect();
                 let extra: Vec<_> = mine.keys().filter(|k| !rows.contains_key(*k)).take(5).collect();
-                let differ: Vec<_> = rows.iter().filter(|(k, v)| mine.get(*k).is_some_and(|x| x != *v)).map(|(k, _)| k).take(5).collect();
+                let differ: Vec<_> = rows
+                    .iter()
+                    .filter(|(k, v)| mine.get(*k).is_some_and(|x| x != *v))
+                    .map(|(k, _)| k)
+                    .take(5)
+                    .collect();
                 let show = |v: &Vec<Value>| -> String {
-                    v.iter().map(|x| match x { Value::Blob(b) => format!("blob[{}:{:02x?}..]", b.len(), &b[..b.len().min(4)]), o => format!("{o:?}") }).collect::<Vec<_>>().join(", ")
+                    v.iter()
+                        .map(|x| match x {
+                            Value::Blob(b) => format!("blob[{}:{:02x?}..]", b.len(), &b[..b.len().min(4)]),
+                            o => format!("{o:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
-                let detail = differ.first().map(|k| format!("
+                let detail = differ
+                    .first()
+                    .map(|k| {
+                        format!(
+                            "
  mine: {}
- want: {}", show(&mine[*k]), show(&rows[*k]))).unwrap_or_default();
+ want: {}",
+                            show(&mine[*k]),
+                            show(&rows[*k])
+                        )
+                    })
+                    .unwrap_or_default();
                 panic!("table {name}: {} rows vs {} expected; missing {missing:?} extra {extra:?} differ {differ:?}{detail}", mine.len(), rows.len());
             }
         }
@@ -252,7 +285,9 @@ fn random_workload(name: &str, pragmas: &str, seed: u64, steps: usize) {
         } else {
             w.execute_batch(&sql).unwrap_or_else(|e| panic!("step {step}: {sql}: {e}"));
         }
-        if std::env::var("TRACE").is_ok() { eprintln!("step {step}: {sql}"); }
+        if std::env::var("TRACE").is_ok() {
+            eprintln!("step {step}: {sql}");
+        }
         if rng.below(3) == 0 {
             events += poll_into(&mut tail, &mut mirror);
             check(&w, &mut mirror);
@@ -282,7 +317,12 @@ fn random_workload_small_pages() {
 fn random_workload_auto_vacuum() {
     // auto_vacuum relocates pages at every commit to keep the file compact
     for seed in 1..=3 {
-        random_workload(&format!("av-{seed}"), "PRAGMA page_size=1024; PRAGMA auto_vacuum=FULL;", seed * 0xd1b54a32d192ed03, 250);
+        random_workload(
+            &format!("av-{seed}"),
+            "PRAGMA page_size=1024; PRAGMA auto_vacuum=FULL;",
+            seed * 0xd1b54a32d192ed03,
+            250,
+        );
     }
 }
 
@@ -320,7 +360,8 @@ fn schema_changes_are_followed() {
     assert_eq!(upd.after.as_ref().unwrap(), &[Value::Integer(10), Value::Text("none".into())]);
 
     // create + fill in one transaction, then rename, then drop
-    w.execute_batch("BEGIN; CREATE TABLE b(k INTEGER PRIMARY KEY, v); INSERT INTO b(v) VALUES ('p'), ('q'); COMMIT;").unwrap();
+    w.execute_batch("BEGIN; CREATE TABLE b(k INTEGER PRIMARY KEY, v); INSERT INTO b(v) VALUES ('p'), ('q'); COMMIT;")
+        .unwrap();
     let txs = tail.poll().unwrap();
     let ins: Vec<_> = txs.iter().flat_map(|t| &t.changes).filter(|c| c.table == "b").collect();
     assert_eq!(ins.len(), 2);
@@ -351,7 +392,10 @@ fn generated_columns_and_affinity() {
     w.execute_batch("INSERT INTO g(a, d, e) VALUES (7, 'x', 2)").unwrap();
     let c = &tail.poll().unwrap()[0].changes[0];
     assert_eq!(c.columns, ["a", "c", "d", "e"], "virtual columns are not stored and not reported");
-    assert_eq!(c.after.as_ref().unwrap(), &[Value::Integer(7), Value::Real(21.0), Value::Text("x".into()), Value::Real(2.0)]);
+    assert_eq!(
+        c.after.as_ref().unwrap(),
+        &[Value::Integer(7), Value::Real(21.0), Value::Text("x".into()), Value::Real(2.0)]
+    );
 }
 
 #[test]
@@ -398,7 +442,8 @@ fn refuses_rollback_journal_databases() {
 fn without_rowid_composite_key() {
     let path = temp_db("wr");
     let w = writer(&path, "PRAGMA page_size=1024;");
-    w.execute_batch("CREATE TABLE edges(src TEXT, weight REAL, dst TEXT, PRIMARY KEY(dst, src)) WITHOUT ROWID").unwrap();
+    w.execute_batch("CREATE TABLE edges(src TEXT, weight REAL, dst TEXT, PRIMARY KEY(dst, src)) WITHOUT ROWID")
+        .unwrap();
     let mut tail = Tail::open(&path).unwrap();
     w.execute_batch(
         "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<500)
@@ -411,7 +456,10 @@ fn without_rowid_composite_key() {
     w.execute_batch("UPDATE edges SET weight = -weight WHERE src = 'n3'; DELETE FROM edges WHERE src = 'n4';").unwrap();
     let txs = tail.poll().unwrap();
     let upd = &txs[0].changes;
-    assert!(!upd.is_empty() && upd.iter().all(|c| c.op == Op::Update && c.after.as_ref().unwrap()[0] == Value::Text("n3".into())));
+    assert!(
+        !upd.is_empty()
+            && upd.iter().all(|c| c.op == Op::Update && c.after.as_ref().unwrap()[0] == Value::Text("n3".into()))
+    );
     assert!(matches!(upd[0].after.as_ref().unwrap()[1], Value::Real(x) if x < 0.0));
     assert!(txs[1].changes.iter().all(|c| c.op == Op::Delete));
 }

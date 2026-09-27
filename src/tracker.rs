@@ -211,14 +211,14 @@ impl Tracker {
     fn verify(&self, pages: &Pages) {
         let fresh = Tracker::build(pages).expect("rebuild for verification");
         for (name, a, b) in [("owner", &self.owner, &fresh.owner), ("parent", &self.parent, &fresh.parent)] {
-            let mut drift: Vec<_> = a.keys().chain(b.keys()).filter(|p| a.get(p) != b.get(p)).map(|p| (*p, a.get(p), b.get(p))).collect();
+            let mut drift: Vec<_> =
+                a.keys().chain(b.keys()).filter(|p| a.get(p) != b.get(p)).map(|p| (*p, a.get(p), b.get(p))).collect();
             drift.sort();
             drift.dedup();
             assert!(drift.is_empty(), "{name} map drift (page, have, want): {drift:?}");
         }
         assert!(self.overflow == fresh.overflow, "overflow map drift");
     }
-
 
     /// Schema changed: rebuild every index from the new state and diff the pages whose
     /// owner or content moved. Rare (DDL, VACUUM), and O(database) by design.
@@ -306,7 +306,8 @@ fn diff(old_schema: &Schema, new_schema: &Schema, mut old_rows: Rows, mut new_ro
     for name in names {
         let before = old_rows.remove(&name).unwrap_or_default();
         let mut after = new_rows.remove(&name).unwrap_or_default();
-        let columns = find(new_schema, &name).or_else(|| find(old_schema, &name)).map(|t| t.columns).unwrap_or_default();
+        let columns =
+            find(new_schema, &name).or_else(|| find(old_schema, &name)).map(|t| t.columns).unwrap_or_default();
         let mut ops: BTreeMap<Key, Change> = BTreeMap::new();
         let rowid = |k: &Key| match k {
             Key::Rowid(r) => Some(*r),
@@ -318,11 +319,25 @@ fn diff(old_schema: &Schema, new_schema: &Schema, mut old_rows: Rows, mut new_ro
                 Some(a) => (Op::Update, Some(b.values), Some(a.values)),
                 None => (Op::Delete, Some(b.values), None),
             };
-            let c = Change { table: name.clone(), op: change.0, rowid: rowid(&key), columns: columns.clone(), before: change.1, after: change.2 };
+            let c = Change {
+                table: name.clone(),
+                op: change.0,
+                rowid: rowid(&key),
+                columns: columns.clone(),
+                before: change.1,
+                after: change.2,
+            };
             ops.insert(key, c);
         }
         for (key, a) in after {
-            let c = Change { table: name.clone(), op: Op::Insert, rowid: rowid(&key), columns: columns.clone(), before: None, after: Some(a.values) };
+            let c = Change {
+                table: name.clone(),
+                op: Op::Insert,
+                rowid: rowid(&key),
+                columns: columns.clone(),
+                before: None,
+                after: Some(a.values),
+            };
             ops.insert(key, c);
         }
         out.extend(ops.into_values());
