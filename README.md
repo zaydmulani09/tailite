@@ -144,7 +144,7 @@ The test suite drives real SQLite and checks tailite against SQLite itself:
   CREATE/DROP TABLE, VACUUM, PASSIVE/RESTART/TRUNCATE checkpoints) over rowid, AUTOINCREMENT
   and WITHOUT ROWID tables, with 4096-, 1024- and 512-byte pages and with `auto_vacuum=FULL`.
   Every event is replayed into a mirror, every update and delete must carry the exact prior
-  row, and after every poll the mirror must equal `SELECT * ` of every table.
+  row, and after every poll the mirror must equal `SELECT *` of every table.
 - **Index self-check.** In those runs `TAILITE_VERIFY=1` rebuilds the page index from
   scratch after every commit and asserts that the incremental one matches.
 - **Real concurrency.** A writer thread commits and checkpoints aggressively while the tail
