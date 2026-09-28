@@ -1,5 +1,5 @@
 //! On-disk SQLite structures: varints, b-tree pages, cells, overflow chains, records.
-//! Reference: https://www.sqlite.org/fileformat2.html
+//! Reference: <https://www.sqlite.org/fileformat2.html>
 
 use crate::{corrupt, Result, Value};
 use std::collections::HashMap;
