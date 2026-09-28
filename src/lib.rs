@@ -17,6 +17,13 @@
 //! }
 //! # Ok::<(), tailite::Error>(())
 //! ```
+//!
+//! [`Tail::snapshot`] returns every existing row as inserts, consistent with what the
+//! following polls continue from, for an initial load. [`diff`] compares two database
+//! files without a live writer.
+//!
+//! See `docs/ARCHITECTURE.md` in the repository for how pages become rows and why
+//! checkpoints cannot overtake a running tail.
 
 mod format;
 mod schema;

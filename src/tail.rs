@@ -172,6 +172,10 @@ impl Tail {
 
     /// Process every transaction committed since the last poll. Never blocks on the
     /// writer; returns an empty vec when nothing new has been committed.
+    ///
+    /// An error means the log or the database could not be read or decoded. The
+    /// position may then be partway through a batch, so drop this `Tail` and open a new
+    /// one (with [`Tail::snapshot`] to resynchronize) rather than polling it again.
     pub fn poll(&mut self) -> Result<Vec<Transaction>> {
         // pin first, then read: everything the new pin can see is in the log by now
         let next = match self.spare.take() {
