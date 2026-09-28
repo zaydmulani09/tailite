@@ -2,13 +2,13 @@
 name = "tailite"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
 description = "Row-level change data capture for any SQLite database, from outside the process: decodes the WAL, no triggers, no schema changes."
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/zaydmulani09/tailite"
 readme = "README.md"
 keywords = ["sqlite", "cdc", "wal", "change-data-capture", "database"]
 categories = ["database", "command-line-utilities"]
+exclude = [".github/", "rustfmt.toml"]
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
