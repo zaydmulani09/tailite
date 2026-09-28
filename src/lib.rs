@@ -36,6 +36,21 @@ use std::path::Path;
 
 pub use tail::{Tail, Transaction};
 
+static VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Debug aid: after every commit, rebuild the page index from scratch and panic if the
+/// incrementally maintained one differs. Slow. Also enabled by `TAILITE_VERIFY=1`.
+#[doc(hidden)]
+pub fn set_verify(on: bool) {
+    VERIFY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn verify_enabled() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    VERIFY.load(std::sync::atomic::Ordering::Relaxed)
+        || *ENV.get_or_init(|| std::env::var_os("TAILITE_VERIFY").is_some())
+}
+
 /// Row-level difference between two database files (either journal mode; a WAL
 /// database's committed log is included). Unlike a full-table comparison, only pages
 /// whose bytes differ are decoded, so the cost follows the size of the change.

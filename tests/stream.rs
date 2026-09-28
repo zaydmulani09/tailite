@@ -224,7 +224,7 @@ impl Rng {
 
 fn random_workload(name: &str, pragmas: &str, seed: u64, steps: usize) {
     // cross-check the incremental page indexes against a full rebuild after every commit
-    std::env::set_var("TAILITE_VERIFY", "1");
+    tailite::set_verify(true);
     let path = temp_db(name);
     let w = writer(&path, pragmas);
     w.execute_batch(

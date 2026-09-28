@@ -201,7 +201,7 @@ impl Tracker {
                 }
             }
         }
-        if std::env::var_os("TAILITE_VERIFY").is_some() {
+        if crate::verify_enabled() {
             self.verify(new);
         }
         Ok(diff(&self.schema, &self.schema, old_rows, new_rows))
