@@ -77,7 +77,12 @@ fn replay(m: &mut Mirror, changes: &[Change]) {
         let t = m.entry(c.table.clone()).or_default();
         match c.op {
             Op::Insert => {
-                assert!(t.insert(k, c.after.clone().unwrap()).is_none(), "insert of existing row {}#{:?}", c.table, c.rowid);
+                assert!(
+                    t.insert(k, c.after.clone().unwrap()).is_none(),
+                    "insert of existing row {}#{:?}",
+                    c.table,
+                    c.rowid
+                );
             }
             Op::Update => {
                 let prev = t.insert(k, c.after.clone().unwrap());
@@ -483,10 +488,15 @@ fn concurrent_writer_with_checkpoint_pressure() {
             for i in 0..1500u64 {
                 let sql = match rng.below(10) {
                     0..=4 => format!("INSERT INTO t(v, n) VALUES (randomblob({}), {i})", rng.below(3000)),
-                    5..=6 => format!("UPDATE t SET n = n + 1, v = randomblob(length(v)) WHERE id % 13 = {}", rng.below(13)),
+                    5..=6 => {
+                        format!("UPDATE t SET n = n + 1, v = randomblob(length(v)) WHERE id % 13 = {}", rng.below(13))
+                    }
                     7 => format!("DELETE FROM t WHERE id % 17 = {}", rng.below(17)),
-                    _ => ["PRAGMA wal_checkpoint(PASSIVE)", "PRAGMA wal_checkpoint(RESTART)", "PRAGMA wal_checkpoint(TRUNCATE)"]
-                        [rng.below(3) as usize]
+                    _ => [
+                        "PRAGMA wal_checkpoint(PASSIVE)",
+                        "PRAGMA wal_checkpoint(RESTART)",
+                        "PRAGMA wal_checkpoint(TRUNCATE)",
+                    ][rng.below(3) as usize]
                         .into(),
                 };
                 if sql.starts_with("PRAGMA") {
