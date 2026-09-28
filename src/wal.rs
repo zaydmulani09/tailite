@@ -44,7 +44,7 @@ pub(crate) struct Read {
 }
 
 fn checksum(big_endian: bool, data: &[u8], mut s: [u32; 2]) -> [u32; 2] {
-    for w in data.chunks_exact(8) {
+    for w in data.as_chunks::<8>().0 {
         let word = |i: usize| {
             let b = [w[i], w[i + 1], w[i + 2], w[i + 3]];
             if big_endian {

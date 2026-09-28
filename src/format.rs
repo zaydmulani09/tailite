@@ -260,7 +260,7 @@ pub(crate) fn record(b: &[u8], encoding: u32) -> Result<Vec<Value>> {
 }
 
 fn text(v: &[u8], encoding: u32) -> String {
-    let units = |f: fn([u8; 2]) -> u16| -> Vec<u16> { v.chunks_exact(2).map(|c| f([c[0], c[1]])).collect() };
+    let units = |f: fn([u8; 2]) -> u16| -> Vec<u16> { v.as_chunks::<2>().0.iter().map(|&c| f(c)).collect() };
     match encoding {
         2 => String::from_utf16_lossy(&units(u16::from_le_bytes)),
         3 => String::from_utf16_lossy(&units(u16::from_be_bytes)),
