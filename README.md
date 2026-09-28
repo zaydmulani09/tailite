@@ -172,7 +172,9 @@ writer spent executing and committing the same transactions, for scale.
 
 Random updates and deletes touch a different leaf for almost every row, so the cost is
 dominated by reading two images of each touched page. In every phase tailite kept up
-with the writer. Numbers vary with hardware; run the example on yours.
+with the writer. CI runs the same benchmark with 100,000 rows on every push; on GitHub's
+Linux, macOS and Windows runners it measured 430k-710k appended rows/s, 44k-88k random
+updates/s and 32k-70k random deletes/s. Numbers vary with hardware; run it on yours.
 
 ## Limitations
 
