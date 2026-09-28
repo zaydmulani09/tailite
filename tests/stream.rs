@@ -77,7 +77,7 @@ fn replay(m: &mut Mirror, changes: &[Change]) {
         let t = m.entry(c.table.clone()).or_default();
         match c.op {
             Op::Insert => {
-                assert!(t.insert(k, c.after.clone().unwrap()).is_none(), "insert of existing row {c:?}");
+                assert!(t.insert(k, c.after.clone().unwrap()).is_none(), "insert of existing row {}#{:?}", c.table, c.rowid);
             }
             Op::Update => {
                 let prev = t.insert(k, c.after.clone().unwrap());
@@ -462,4 +462,50 @@ fn without_rowid_composite_key() {
     );
     assert!(matches!(upd[0].after.as_ref().unwrap()[1], Value::Real(x) if x < 0.0));
     assert!(txs[1].changes.iter().all(|c| c.op == Op::Delete));
+}
+
+#[test]
+fn concurrent_writer_with_checkpoint_pressure() {
+    // The writer runs on its own thread and checkpoints aggressively (including RESTART
+    // and TRUNCATE, which reset the log) while the tail polls as fast as it can. If the
+    // pin protocol let a checkpoint overtake the tail, before-images would be read from
+    // an already-overwritten main file and the replay assertions would fire.
+    let path = temp_db("concurrent");
+    let w = writer(&path, "PRAGMA page_size=1024;");
+    w.execute_batch("PRAGMA wal_autocheckpoint=8; CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB, n INTEGER);").unwrap();
+    let mut tail = Tail::open(&path).unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_thread = {
+        let (path, done) = (path.clone(), done.clone());
+        std::thread::spawn(move || {
+            let w = writer(&path, "PRAGMA wal_autocheckpoint=8; PRAGMA busy_timeout=50;");
+            let mut rng = Rng(0x5eed);
+            for i in 0..1500u64 {
+                let sql = match rng.below(10) {
+                    0..=4 => format!("INSERT INTO t(v, n) VALUES (randomblob({}), {i})", rng.below(3000)),
+                    5..=6 => format!("UPDATE t SET n = n + 1, v = randomblob(length(v)) WHERE id % 13 = {}", rng.below(13)),
+                    7 => format!("DELETE FROM t WHERE id % 17 = {}", rng.below(17)),
+                    _ => ["PRAGMA wal_checkpoint(PASSIVE)", "PRAGMA wal_checkpoint(RESTART)", "PRAGMA wal_checkpoint(TRUNCATE)"]
+                        [rng.below(3) as usize]
+                        .into(),
+                };
+                if sql.starts_with("PRAGMA") {
+                    w.query_row(&sql, [], |_| Ok(())).unwrap();
+                } else {
+                    w.execute_batch(&sql).unwrap();
+                }
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let mut mirror = Mirror::new();
+    let mut polls = 0;
+    while !done.load(std::sync::atomic::Ordering::SeqCst) {
+        poll_into(&mut tail, &mut mirror);
+        polls += 1;
+    }
+    writer_thread.join().unwrap();
+    poll_into(&mut tail, &mut mirror);
+    check(&w, &mut mirror);
+    assert!(polls > 10, "the tail should have polled while the writer ran ({polls})");
 }
